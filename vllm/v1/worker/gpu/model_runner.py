@@ -292,6 +292,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.load_config.load_format = "dummy"
         self.eplb.prepare_load()
         eplb_models_added = False
+        # Model weight offloader. The V1 runner installs this in its __init__
+        # (see gpu_model_runner.py); the V2 runner must do the same before the
+        # model is constructed, otherwise make_layers() sees a NoopOffloader and
+        # the --offload-* flags are silently ignored. Install before load_model.
+        from vllm.model_executor.offloader import (
+            create_offloader,
+            get_offloader,
+            set_offloader,
+        )
+
+        set_offloader(create_offloader(self.vllm_config.offload_config))
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
             logger.info("Loading model from scratch...")
@@ -349,6 +360,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
+
+        # Finalize the weight offloader: allocate the static prefetch buffer
+        # pool and start initial prefetches. Must run after the weights are
+        # loaded/transformed (process_weights_after_loading) and before any
+        # forward, otherwise the prefetch hooks read uninitialized GPU buffers
+        # and crash with CUDA_ERROR_ILLEGAL_ADDRESS during profile_run. The V1
+        # runner does this at the end of load_model (gpu_model_runner.py); the
+        # V2 runner must mirror it. No-op for the NoopOffloader.
+        get_offloader().post_init()
 
     def get_model(self) -> nn.Module:
         return self.model
